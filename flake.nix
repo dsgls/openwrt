@@ -26,8 +26,11 @@
       # honour over gcc-ar. Nix binutils has no LTO plugin, so plain ar writes
       # an empty symbol index for LTO objects (e.g. host apk, built with
       # -Db_lto=true). Set in shellHook so it runs after the setup hooks.
+      # rules.mk word-splits $(PATH), so an entry with spaces (WSL's Windows
+      # paths) yields relative entries, which `find -execdir` refuses.
       shellHook = ''
         export AR=gcc-ar NM=gcc-nm RANLIB=gcc-ranlib
+        PATH=$(printf %s "$PATH" | tr : '\n' | grep -v ' ' | paste -sd:)
       '';
     };
   };
