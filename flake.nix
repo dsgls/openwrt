@@ -18,6 +18,9 @@
         swig
       ];
       hardeningDisable = [ "all" ];
+      # libc headers are only known to the cc wrapper; CMake's find_path
+      # (e.g. libarchive's iconv.h check in tools/cmake) needs them spelled out.
+      CMAKE_INCLUDE_PATH = "${pkgs.lib.getDev pkgs.stdenv.cc.libc}/include";
     };
   };
 }
