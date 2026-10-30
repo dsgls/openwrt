@@ -16,6 +16,7 @@
         (python3.withPackages (ps: [ps.setuptools]))
         cdrtools
         swig
+        ccache
       ];
       hardeningDisable = [ "all" ];
       # libc headers are only known to the cc wrapper; CMake's find_path
