@@ -37,3 +37,4 @@ git-src
 .sccache
 .vscode*
 /docs/superpowers/
+/docs/tmp
