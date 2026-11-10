@@ -17,6 +17,13 @@
         cdrtools
         swig
         ccache
+        # include/prereq-build.mk; stdenv supplies the rest. Its Perl modules
+        # (Data::Dumper, FindBin, Thread::Queue, IPC::Cmd, ...) are all core.
+        wget
+        perl
+        rsync
+        which
+        util-linux # getopt --long
       ];
       hardeningDisable = [ "all" ];
       # libc headers are only known to the cc wrapper; CMake's find_path
