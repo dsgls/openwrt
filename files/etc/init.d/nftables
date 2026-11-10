@@ -1,0 +1,20 @@
+#!/bin/sh /etc/rc.common
+# Loads an externally deployed ruleset. Runs before network (START=20) so
+# interfaces never come up unfiltered.
+
+START=19
+
+CONF=/etc/nftables.conf
+
+start() {
+	[ -f "$CONF" ] || return 0
+	nft -f "$CONF"
+}
+
+stop() {
+	nft flush ruleset
+}
+
+reload() {
+	start
+}

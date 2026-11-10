@@ -38,3 +38,5 @@ git-src
 .vscode*
 /docs/superpowers/
 /docs/tmp
+# Rootfs overlay for the config-* images
+!/files
