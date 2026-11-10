@@ -42,6 +42,12 @@ static inline unsigned int ag71xx_max_frame_len(unsigned int mtu)
 	return ETH_SWITCH_HEADER_LEN + ETH_HLEN + VLAN_HLEN + mtu + ETH_FCS_LEN;
 }
 
+static inline unsigned int ag71xx_rx_buf_size(unsigned int mtu)
+{
+	return SKB_DATA_ALIGN(ag71xx_max_frame_len(mtu) + NET_SKB_PAD +
+			      NET_IP_ALIGN);
+}
+
 static void ag71xx_dump_dma_regs(struct ag71xx *ag)
 {
 	DBG("%s: dma_tx_ctrl=%08x, dma_tx_desc=%08x, dma_tx_status=%08x\n",
@@ -175,15 +181,32 @@ static int ag71xx_buffer_size(struct ag71xx *ag)
 	       SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
 }
 
+static void *ag71xx_alloc_rx_buf(struct ag71xx *ag, bool napi)
+{
+	unsigned int size = ag71xx_buffer_size(ag);
+	struct page *page;
+
+	if (size <= PAGE_SIZE)
+		return napi ? napi_alloc_frag(size) : netdev_alloc_frag(size);
+
+	/* The page frag cache fails any fragment above PAGE_SIZE that its
+	 * current block cannot hold, so jumbo buffers get pages of their own.
+	 * __GFP_COMP lets skb_free_frag() free the whole block.
+	 */
+	page = alloc_pages((napi ? GFP_ATOMIC : GFP_KERNEL) | __GFP_COMP |
+			   __GFP_NOWARN, get_order(size));
+
+	return page ? page_address(page) : NULL;
+}
+
 static bool ag71xx_fill_rx_buf(struct ag71xx *ag, struct ag71xx_buf *buf,
-			       int offset,
-			       void *(*alloc)(unsigned int size))
+			       int offset, bool napi)
 {
 	struct ag71xx_ring *ring = &ag->rx_ring;
 	struct ag71xx_desc *desc = ag71xx_ring_desc(ring, buf - &ring->buf[0]);
 	void *data;
 
-	data = alloc(ag71xx_buffer_size(ag));
+	data = ag71xx_alloc_rx_buf(ag, napi);
 	if (!data)
 		return false;
 
@@ -217,7 +240,7 @@ static int ag71xx_ring_rx_init(struct ag71xx *ag)
 		struct ag71xx_desc *desc = ag71xx_ring_desc(ring, i);
 
 		if (!ag71xx_fill_rx_buf(ag, &ring->buf[i], ag->rx_buf_offset,
-					netdev_alloc_frag)) {
+					false)) {
 			ret = -ENOMEM;
 			break;
 		}
@@ -250,8 +273,7 @@ static int ag71xx_ring_rx_refill(struct ag71xx *ag)
 		desc = ag71xx_ring_desc(ring, i);
 
 		if (!ring->buf[i].rx_buf &&
-		    !ag71xx_fill_rx_buf(ag, &ring->buf[i], offset,
-					napi_alloc_frag))
+		    !ag71xx_fill_rx_buf(ag, &ring->buf[i], offset, true))
 			break;
 
 		desc->ctrl = DESC_EMPTY;
@@ -1013,7 +1035,7 @@ static int ag71xx_open(struct net_device *dev)
 
 	netif_carrier_off(dev);
 	max_frame_len = ag71xx_max_frame_len(dev->mtu);
-	ag->rx_buf_size = SKB_DATA_ALIGN(max_frame_len + NET_SKB_PAD + NET_IP_ALIGN);
+	ag->rx_buf_size = ag71xx_rx_buf_size(dev->mtu);
 
 	/* setup max frame length */
 	ag71xx_wr(ag, AG71XX_REG_MAC_MFL, max_frame_len);
@@ -1480,6 +1502,13 @@ static irqreturn_t ag71xx_interrupt(int irq, void *dev_id)
 static int ag71xx_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct ag71xx *ag = netdev_priv(dev);
+
+	/* The rx buffers are sized at open; the MAC must never accept a
+	 * frame larger than they hold.
+	 */
+	if (netif_running(dev) &&
+	    ag71xx_rx_buf_size(new_mtu) > ag->rx_buf_size)
+		return -EBUSY;
 
 	dev->mtu = new_mtu;
 	ag71xx_wr(ag, AG71XX_REG_MAC_MFL,
