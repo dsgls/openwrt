@@ -35,6 +35,9 @@ MODULE_PARM_DESC(msg_level, "Message level (-1=defaults,0=none,...,16=all)");
 
 #define ETH_SWITCH_HEADER_LEN	2
 
+/* Frames up to this size are copied out of jumbo rx buffers */
+#define AG71XX_RX_COPYBREAK	1536
+
 static int ag71xx_tx_packets(struct ag71xx *ag, bool flush, int budget);
 
 static inline unsigned int ag71xx_max_frame_len(unsigned int mtu)
@@ -181,20 +184,38 @@ static int ag71xx_buffer_size(struct ag71xx *ag)
 	       SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
 }
 
+/* Buffers above PAGE_SIZE are page blocks of their own, see below */
+static bool ag71xx_rx_jumbo(unsigned int rx_buf_size)
+{
+	return rx_buf_size + SKB_DATA_ALIGN(sizeof(struct skb_shared_info)) >
+	       PAGE_SIZE;
+}
+
+/* The memory an rx buffer actually holds, so truesize is honest */
+static unsigned int ag71xx_rx_frag_size(struct ag71xx *ag)
+{
+	unsigned int size = ag71xx_buffer_size(ag);
+
+	return ag71xx_rx_jumbo(ag->rx_buf_size) ?
+	       PAGE_SIZE << get_order(size) : size;
+}
+
 static void *ag71xx_alloc_rx_buf(struct ag71xx *ag, bool napi)
 {
 	unsigned int size = ag71xx_buffer_size(ag);
 	struct page *page;
 
-	if (size <= PAGE_SIZE)
+	if (!ag71xx_rx_jumbo(ag->rx_buf_size))
 		return napi ? napi_alloc_frag(size) : netdev_alloc_frag(size);
 
 	/* The page frag cache fails any fragment above PAGE_SIZE that its
 	 * current block cannot hold, so jumbo buffers get pages of their own.
 	 * __GFP_COMP lets skb_free_frag() free the whole block.
+	 * __GFP_RETRY_MAYFAIL returns ENOMEM rather than OOM-killing.
 	 */
-	page = alloc_pages((napi ? GFP_ATOMIC : GFP_KERNEL) | __GFP_COMP |
-			   __GFP_NOWARN, get_order(size));
+	page = alloc_pages((napi ? GFP_ATOMIC :
+			    GFP_KERNEL | __GFP_RETRY_MAYFAIL) |
+			   __GFP_COMP | __GFP_NOWARN, get_order(size));
 
 	return page ? page_address(page) : NULL;
 }
@@ -977,6 +998,10 @@ __ag71xx_link_adjust(struct ag71xx *ag, bool update)
 		}
 	}
 
+	/* No rings after a failed restart; ag71xx_hw_restart() relinks */
+	if (!ag->rx_ring.buf)
+		return;
+
 	ag71xx_hw_start(ag);
 
 	netif_carrier_on(ag->dev);
@@ -1017,7 +1042,9 @@ static void ag71xx_hw_disable(struct ag71xx *ag)
 	ag71xx_hw_stop(ag);
 	ag71xx_dma_reset(ag);
 
-	napi_disable(&ag->napi);
+	/* NAPI is enabled exactly while the rings exist */
+	if (ag->rx_ring.buf)
+		napi_disable(&ag->napi);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,16,0)
 	del_timer_sync(&ag->oom_timer);
 #else
@@ -1221,15 +1248,36 @@ static void ag71xx_tx_timeout(struct net_device *dev, unsigned int txqueue)
 	schedule_delayed_work(&ag->restart_work, 1);
 }
 
+/* Rebuild the rings with rx buffers sized for dev->mtu. On failure the
+ * device keeps no rings and NAPI stays off until the next restart or open.
+ */
+static int ag71xx_hw_restart(struct ag71xx *ag)
+{
+	int ret;
+
+	ag71xx_hw_disable(ag);
+	ag->rx_buf_size = ag71xx_rx_buf_size(ag->dev->mtu);
+	ag71xx_wr(ag, AG71XX_REG_MAC_MFL, ag71xx_max_frame_len(ag->dev->mtu));
+
+	ret = ag71xx_hw_enable(ag);
+	if (ret) {
+		ag71xx_rings_cleanup(ag);
+		return ret;
+	}
+
+	if (ag->link)
+		__ag71xx_link_adjust(ag, false);
+
+	return 0;
+}
+
 static void ag71xx_restart_work_func(struct work_struct *work)
 {
 	struct ag71xx *ag = container_of(work, struct ag71xx, restart_work.work);
 
 	rtnl_lock();
-	ag71xx_hw_disable(ag);
-	ag71xx_hw_enable(ag);
-	if (ag->link)
-		__ag71xx_link_adjust(ag, false);
+	if (netif_running(ag->dev) && ag71xx_hw_restart(ag))
+		netdev_err(ag->dev, "no rx rings, down/up to recover\n");
 	rtnl_unlock();
 }
 
@@ -1323,6 +1371,29 @@ static int ag71xx_tx_packets(struct ag71xx *ag, bool flush, int budget)
 	return sent;
 }
 
+/* Copy a small frame out so the jumbo buffer stays mapped for the next one,
+ * sparing the page allocator an order-2 atomic refill per packet.
+ */
+static struct sk_buff *ag71xx_rx_copy(struct ag71xx *ag,
+				      struct ag71xx_buf *buf, int pktlen)
+{
+	struct device *dev = &ag->pdev->dev;
+	unsigned int offset = ag->rx_buf_offset;
+	struct sk_buff *skb;
+
+	skb = napi_alloc_skb(&ag->napi, pktlen);
+	if (!skb)
+		return NULL;
+
+	dma_sync_single_range_for_cpu(dev, buf->dma_addr, offset, pktlen,
+				      DMA_FROM_DEVICE);
+	skb_put_data(skb, buf->rx_buf + offset, pktlen);
+	dma_sync_single_range_for_device(dev, buf->dma_addr, offset, pktlen,
+					 DMA_FROM_DEVICE);
+
+	return skb;
+}
+
 static int ag71xx_rx_packets(struct ag71xx *ag, int limit)
 {
 	struct net_device *dev = ag->dev;
@@ -1358,20 +1429,29 @@ static int ag71xx_rx_packets(struct ag71xx *ag, int limit)
 		pktlen = desc->ctrl & pktlen_mask;
 		pktlen -= ETH_FCS_LEN;
 
-		dma_unmap_single(&ag->pdev->dev, ring->buf[i].dma_addr,
-				 ag->rx_buf_size, DMA_FROM_DEVICE);
-
 		dev->stats.rx_packets++;
 		dev->stats.rx_bytes += pktlen;
 
-		skb = napi_build_skb(ring->buf[i].rx_buf, ag71xx_buffer_size(ag));
-		if (!skb) {
-			skb_free_frag(ring->buf[i].rx_buf);
-			goto next;
-		}
+		skb = NULL;
+		if (pktlen > 0 && pktlen <= AG71XX_RX_COPYBREAK &&
+		    ag71xx_rx_jumbo(ag->rx_buf_size))
+			skb = ag71xx_rx_copy(ag, &ring->buf[i], pktlen);
 
-		skb_reserve(skb, offset);
-		skb_put(skb, pktlen);
+		if (!skb) {
+			dma_unmap_single(&ag->pdev->dev, ring->buf[i].dma_addr,
+					 ag->rx_buf_size, DMA_FROM_DEVICE);
+
+			skb = napi_build_skb(ring->buf[i].rx_buf,
+					     ag71xx_rx_frag_size(ag));
+			if (!skb)
+				skb_free_frag(ring->buf[i].rx_buf);
+			ring->buf[i].rx_buf = NULL;
+			if (!skb)
+				goto next;
+
+			skb_reserve(skb, offset);
+			skb_put(skb, pktlen);
+		}
 
 		if (err) {
 			dev->stats.rx_dropped++;
@@ -1383,7 +1463,6 @@ static int ag71xx_rx_packets(struct ag71xx *ag, int limit)
 		}
 
 next:
-		ring->buf[i].rx_buf = NULL;
 		done++;
 
 		ring->curr++;
@@ -1499,54 +1578,36 @@ static irqreturn_t ag71xx_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-/* Rebuild the rings with rx buffers sized for dev->mtu, as restart_work does */
-static int ag71xx_rx_resize(struct ag71xx *ag)
-{
-	int ret;
-
-	ag71xx_hw_disable(ag);
-	ag->rx_buf_size = ag71xx_rx_buf_size(ag->dev->mtu);
-	ag71xx_wr(ag, AG71XX_REG_MAC_MFL, ag71xx_max_frame_len(ag->dev->mtu));
-
-	ret = ag71xx_hw_enable(ag);
-	if (ret) {
-		ag71xx_rings_cleanup(ag);
-		/* balance the napi_disable() in the next ag71xx_hw_disable() */
-		napi_enable(&ag->napi);
-		return ret;
-	}
-
-	if (ag->link)
-		__ag71xx_link_adjust(ag, false);
-
-	return 0;
-}
-
 static int ag71xx_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct ag71xx *ag = netdev_priv(dev);
+	unsigned int size = ag71xx_rx_buf_size(new_mtu);
 	int old_mtu = dev->mtu;
+	bool grow, shrink;
 	int ret;
 
-	/* The rx buffers are sized at open; the MAC must never accept a
-	 * frame larger than they hold.
+	/* The MAC must never accept a frame larger than the rx buffers hold;
+	 * grow them first. Leaving jumbo sizes also drops the page blocks,
+	 * and a device left without rings retries.
 	 */
-	if (netif_running(dev) &&
-	    ag71xx_rx_buf_size(new_mtu) > ag->rx_buf_size) {
-		dev->mtu = new_mtu;
-		ret = ag71xx_rx_resize(ag);
-		if (ret) {
-			dev->mtu = old_mtu;
-			if (ag71xx_rx_resize(ag)) {
-				/* no rings: keep link-up from starting DMA */
-				phy_stop(ag->phy_dev);
-				netdev_err(dev, "no rx rings, down/up to recover\n");
-			}
+	grow = size > ag->rx_buf_size;
+	shrink = ag71xx_rx_jumbo(ag->rx_buf_size) && !ag71xx_rx_jumbo(size);
+	if (netif_running(dev) && (grow || shrink || !ag->rx_ring.buf)) {
+		WRITE_ONCE(dev->mtu, new_mtu);
+		ret = ag71xx_hw_restart(ag);
+		if (!ret)
+			return 0;
+
+		WRITE_ONCE(dev->mtu, old_mtu);
+		if (ag71xx_hw_restart(ag)) {
+			netdev_err(dev, "no rx rings, down/up to recover\n");
+			return ret;
 		}
-		return ret;
+		if (grow)
+			return ret;
 	}
 
-	dev->mtu = new_mtu;
+	WRITE_ONCE(dev->mtu, new_mtu);
 	ag71xx_wr(ag, AG71XX_REG_MAC_MFL,
 		  ag71xx_max_frame_len(dev->mtu));
 
