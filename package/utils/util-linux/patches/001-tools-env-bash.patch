@@ -1,0 +1,18 @@
+The build runs these generators directly, and a host without /bin/bash
+(NixOS) cannot exec them.
+
+--- a/tools/all_errnos
++++ b/tools/all_errnos
+@@ -1,4 +1,4 @@
+-#!/bin/bash
++#!/usr/bin/env bash
+ 
+ # Derived from all_syscalls.
+ 
+--- a/tools/all_syscalls
++++ b/tools/all_syscalls
+@@ -1,3 +1,3 @@
+-#!/bin/bash
++#!/usr/bin/env bash
+ 
+ set -e
