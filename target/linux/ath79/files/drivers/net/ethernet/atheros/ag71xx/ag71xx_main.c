@@ -1499,16 +1499,52 @@ static irqreturn_t ag71xx_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+/* Rebuild the rings with rx buffers sized for dev->mtu, as restart_work does */
+static int ag71xx_rx_resize(struct ag71xx *ag)
+{
+	int ret;
+
+	ag71xx_hw_disable(ag);
+	ag->rx_buf_size = ag71xx_rx_buf_size(ag->dev->mtu);
+	ag71xx_wr(ag, AG71XX_REG_MAC_MFL, ag71xx_max_frame_len(ag->dev->mtu));
+
+	ret = ag71xx_hw_enable(ag);
+	if (ret) {
+		ag71xx_rings_cleanup(ag);
+		/* balance the napi_disable() in the next ag71xx_hw_disable() */
+		napi_enable(&ag->napi);
+		return ret;
+	}
+
+	if (ag->link)
+		__ag71xx_link_adjust(ag, false);
+
+	return 0;
+}
+
 static int ag71xx_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct ag71xx *ag = netdev_priv(dev);
+	int old_mtu = dev->mtu;
+	int ret;
 
 	/* The rx buffers are sized at open; the MAC must never accept a
 	 * frame larger than they hold.
 	 */
 	if (netif_running(dev) &&
-	    ag71xx_rx_buf_size(new_mtu) > ag->rx_buf_size)
-		return -EBUSY;
+	    ag71xx_rx_buf_size(new_mtu) > ag->rx_buf_size) {
+		dev->mtu = new_mtu;
+		ret = ag71xx_rx_resize(ag);
+		if (ret) {
+			dev->mtu = old_mtu;
+			if (ag71xx_rx_resize(ag)) {
+				/* no rings: keep link-up from starting DMA */
+				phy_stop(ag->phy_dev);
+				netdev_err(dev, "no rx rings, down/up to recover\n");
+			}
+		}
+		return ret;
+	}
 
 	dev->mtu = new_mtu;
 	ag71xx_wr(ag, AG71XX_REG_MAC_MFL,
