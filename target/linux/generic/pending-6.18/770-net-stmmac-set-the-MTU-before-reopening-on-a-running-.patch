@@ -1,0 +1,38 @@
+From: Davíð Steinn Geirsson <david@dsg.is>
+Date: Wed, 11 Nov 2026 00:00:00 +0000
+Subject: [PATCH] net: stmmac: set the MTU before reopening on a running change
+
+stmmac_change_mtu() reopens a running interface with DMA buffers sized
+for the new MTU, but only updates dev->mtu after __stmmac_open()
+returns. The reopen reprograms the MAC through stmmac_core_init(), and
+dwmac1000_core_init() derives GMAC_CONTROL_2K and GMAC_CONTROL_JE from
+dev->mtu, so it sees the old value: raising the MTU of a running
+interface to a jumbo size leaves jumbo frame reception disabled until
+the next down/up.
+
+Set dev->mtu before the reopen and restore it if the reopen fails.
+
+Signed-off-by: Davíð Steinn Geirsson <david@dsg.is>
+---
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -5959,6 +5959,7 @@ static int stmmac_change_mtu(struct net_
+ 	struct stmmac_priv *priv = netdev_priv(dev);
+ 	int txfifosz = priv->plat->tx_fifo_size;
+ 	struct stmmac_dma_conf *dma_conf;
++	const int old_mtu = dev->mtu;
+ 	const int mtu = new_mtu;
+ 	int ret;
+ 
+@@ -5990,8 +5991,11 @@ static int stmmac_change_mtu(struct net_
+ 
+ 		__stmmac_release(dev);
+ 
++		/* The core init on reopen programs the MAC from dev->mtu */
++		WRITE_ONCE(dev->mtu, mtu);
+ 		ret = __stmmac_open(dev, dma_conf);
+ 		if (ret) {
++			WRITE_ONCE(dev->mtu, old_mtu);
+ 			free_dma_desc_resources(priv, dma_conf);
+ 			kfree(dma_conf);
+ 			netdev_err(priv->dev, "failed reopening the interface after MTU change\n");
