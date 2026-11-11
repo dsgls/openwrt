@@ -12,7 +12,9 @@
 # this. Only src-git feeds on their default branch are handled.
 #
 # Bumping the feeds:
-#   1. Rebase the fork onto upstream main.
+#   1. Rebase the fork onto upstream main. Keep its kernel fixes (ag71xx,
+#      stmmac): the APs' 9000-byte underlay depends on them, and an image
+#      without them takes an AP off the network on its next deploy.
 #   2. ./update-feeds.sh
 #   3. ./scripts/feeds update -a && ./scripts/feeds install -a
 #   4. Per config-<ap>, check that `make defconfig` drops no selection:
