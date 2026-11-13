@@ -82,8 +82,8 @@ define KernelPackage/hwmon-adt7475
   TITLE:=ADT7473/7475/7476/7490 monitoring support
   KCONFIG:=CONFIG_SENSORS_ADT7475
   FILES:=$(LINUX_DIR)/drivers/hwmon/adt7475.ko
-  AUTOLOAD:=$(call AutoProbe,adt7475)
-  $(call AddDepends/hwmon,+kmod-i2c-core +kmod-hwmon-vid)
+  AUTOLOAD:=$(call AutoProbe,adt7475,1)
+  $(call AddDepends/hwmon,+kmod-i2c-core +kmod-hwmon-vid +PACKAGE_kmod-thermal:kmod-thermal)
 endef
 
 define KernelPackage/hwmon-adt7475/description
@@ -592,7 +592,7 @@ define KernelPackage/hwmon-pwmfan
   TITLE:=Generic PWM FAN support
   KCONFIG:=CONFIG_SENSORS_PWM_FAN
   FILES:=$(LINUX_DIR)/drivers/hwmon/pwm-fan.ko
-  AUTOLOAD:=$(call AutoLoad,60,pwm-fan)
+  AUTOLOAD:=$(call AutoLoad,60,pwm-fan,1)
   $(call AddDepends/hwmon,@PWM_SUPPORT +PACKAGE_kmod-thermal:kmod-thermal)
 endef
 

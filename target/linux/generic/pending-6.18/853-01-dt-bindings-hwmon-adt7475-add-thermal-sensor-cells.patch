@@ -1,0 +1,53 @@
+From: Davíð Steinn Geirsson <david@dsg.is>
+Date: Fri, 13 Nov 2026 17:29:56 +0000
+Subject: [PATCH 1/4] dt-bindings: hwmon: adt7475: Add #thermal-sensor-cells
+
+The ADT7473, ADT7475, ADT7476 and ADT7490 measure two remote
+temperatures and their own. Add the "#thermal-sensor-cells" property so
+that thermal zones can use these as sensors. Its single cell selects the
+temperature channel: 0 for Remote 1, 1 for Local and 2 for Remote 2.
+
+Signed-off-by: Davíð Steinn Geirsson <david@dsg.is>
+---
+ .../devicetree/bindings/hwmon/adt7475.yaml       | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+--- a/Documentation/devicetree/bindings/hwmon/adt7475.yaml
++++ b/Documentation/devicetree/bindings/hwmon/adt7475.yaml
+@@ -73,6 +73,14 @@ properties:
+       - 2: PWM flags 0 or PWM_POLARITY_INVERTED
+       - 3: The default PWM duty cycle in nanoseconds, defaults to period.
+ 
++  "#thermal-sensor-cells":
++    const: 1
++    description: |
++      The cell is the temperature channel.
++      - 0: Remote 1
++      - 1: Local
++      - 2: Remote 2
++
+ patternProperties:
+   "^adi,bypass-attenuator-in[0-4]$":
+     description: |
+@@ -111,6 +119,13 @@ required:
+   - compatible
+   - reg
+ 
++allOf:
++  - if:
++      required:
++        - "#thermal-sensor-cells"
++    then:
++      $ref: /schemas/thermal/thermal-sensor.yaml#
++
+ additionalProperties: false
+ 
+ examples:
+@@ -128,6 +143,7 @@ examples:
+         adi,pin10-function = "smbalert#";
+         adi,pin14-function = "tach4";
+         #pwm-cells = <3>;
++        #thermal-sensor-cells = <1>;
+ 
+         /* PWMs at 22.5 kHz frequency */
+         fan-0 {
