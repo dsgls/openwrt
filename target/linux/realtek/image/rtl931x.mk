@@ -113,7 +113,8 @@ define Device/ubnt_usw-pro-xg-8-poe
   DEVICE_VENDOR := Ubiquiti
   DEVICE_MODEL := UniFi USW Pro XG 8 PoE
   IMAGE_SIZE := 30272k
-  DEVICE_PACKAGES := rtl826x-firmware kmod-hwmon-adt7475 kmod-pse-realtek-mcu-i2c
+  DEVICE_PACKAGES := rtl826x-firmware kmod-hwmon-adt7475 kmod-hwmon-pwmfan \
+    kmod-pse-realtek-mcu-i2c kmod-thermal
   $(Device/kernel-lzma)
 endef
 TARGET_DEVICES += ubnt_usw-pro-xg-8-poe

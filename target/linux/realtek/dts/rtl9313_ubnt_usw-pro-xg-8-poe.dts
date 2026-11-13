@@ -8,6 +8,58 @@
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/mux/mux.h>
 #include <dt-bindings/phy/phy.h>
+#include <dt-bindings/thermal/thermal.h>
+
+/*
+ * Zone <name>-thermal on <sensor>, fan curve for setpoint s in C. The
+ * thermal core binds the maps by node name, so name must be unique and at
+ * most 11 characters. 16 must be the last state of the fans' cooling-levels.
+ */
+#define FAN_ZONE(name, sensor, s)						\
+	name-thermal {								\
+		polling-delay-passive = <0>;					\
+		polling-delay = <5000>;						\
+		thermal-sensors = <sensor>;					\
+										\
+		trips {								\
+			name##_control: control {				\
+				temperature = <(((s) + 3) * 1000)>;		\
+				hysteresis = <5000>;				\
+				type = "active";				\
+			};							\
+										\
+			name##_floor: floor {					\
+				temperature = <(((s) + 5) * 1000)>;		\
+				hysteresis = <2000>;				\
+				type = "active";				\
+			};							\
+										\
+			name##_full: full {					\
+				temperature = <(((s) + 7) * 1000)>;		\
+				hysteresis = <2000>;				\
+				type = "active";				\
+			};							\
+		};								\
+										\
+		cooling-maps {							\
+			map-control {						\
+				trip = <&name##_control>;			\
+				cooling-device =				\
+				<&fan0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,	\
+				<&fan1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;	\
+			};							\
+										\
+			map-floor {						\
+				trip = <&name##_floor>;				\
+				cooling-device = <&fan0 8 8>, <&fan1 8 8>;	\
+			};							\
+										\
+			map-full {						\
+				trip = <&name##_full>;				\
+				cooling-device = <&fan0 16 16>, <&fan1 16 16>;	\
+			};							\
+		};								\
+	};
 
 / {
 	compatible = "ubnt,usw-pro-xg-8-poe", "realtek,rtl9313-soc";
@@ -79,6 +131,22 @@
 			     RTL93XX_LED_SET_LINK | RTL93XX_LED_SET_ACT)>;
 	};
 
+	fan0: fan-0 {
+		compatible = "pwm-fan";
+		pwms = <&adt7475 0 44444 0>;	/* pwm1, 22.5 kHz */
+		cooling-levels = <77 88 99 110 122 133 144 155 166 177 188 199 211 222 233 244 255>;
+		#cooling-cells = <2>;
+		fan-shutdown-percent = <100>;
+	};
+
+	fan1: fan-1 {
+		compatible = "pwm-fan";
+		pwms = <&adt7475 1 44444 0>;	/* pwm2, 22.5 kHz */
+		cooling-levels = <77 88 99 110 122 133 144 155 166 177 188 199 211 222 233 244 255>;
+		#cooling-cells = <2>;
+		fan-shutdown-percent = <100>;
+	};
+
 	sfp1: sfp-p1 {
 		compatible = "sff,sfp";
 		i2c-bus = <&i2c_sfp1>;
@@ -95,6 +163,48 @@
 		mod-def0-gpio = <&gpio2 6 GPIO_ACTIVE_LOW>;
 		tx-disable-gpio = <&gpio2 7 GPIO_ACTIVE_HIGH>;
 		tx-fault-gpio = <&gpio2 5 GPIO_ACTIVE_HIGH>;
+	};
+
+	/*
+	 * Fan curve. Stock holds 30% (PWM 77) until a sensor reaches S + 3,
+	 * where S is its setpoint: 90 C for the CPU, 65 C for the SFP area and
+	 * 105 C for the PHYs. It then adds at most 10 PWM per 5 s, holds within
+	 * 2 C of S and ramps down below S - 2.
+	 *
+	 * Each zone polls every 5 s and has three active trips on both fans,
+	 * evaluated by step_wise:
+	 * - control, S + 3, hysteresis 5 C: while the reading rises the fans
+	 *   go up one state, while it is equal they hold, while it falls they
+	 *   go down one state but not below state 1, until it drops below S - 2;
+	 * - floor, S + 5, hysteresis 2 C: at least state 8 (PWM 166);
+	 * - full, S + 7, hysteresis 2 C: state 16, full speed.
+	 * The fans follow the highest state any zone requests. One state is
+	 * about stock's 10 PWM step.
+	 *
+	 * Differences from stock: below S - 2 the fans drop straight to 30%.
+	 * Once the control trip is active, any rise at or above S - 2 adds a
+	 * state; stock holds within 2 C of S. The control trip steps from the
+	 * fans' shared state, so opposite wobbles in two zones in their control
+	 * bands push the state up, and a single zone wanders within its band.
+	 * PHY readings are whole degrees. pwm-fan rounds the duty up on a
+	 * period - 1 scale and adt7475 rounds it down, so the written duty is
+	 * the level or one below it (77 gives 77, 166 gives 165).
+	 *
+	 * Tune the trips here. Do not write pwm-fan's pwm1 or pwm1_enable or a
+	 * cooling device's cur_state: such a write lasts until the next state
+	 * change, and pwm1_enable = 0 turns thermal control off.
+	 */
+	thermal-zones {
+		FAN_ZONE(cpu, &adt7475 0, 90)
+		FAN_ZONE(sfp, &adt7475 2, 65)
+		FAN_ZONE(phy1, &phy0, 105)
+		FAN_ZONE(phy2, &phy8, 105)
+		FAN_ZONE(phy3, &phy16, 105)
+		FAN_ZONE(phy4, &phy24, 105)
+		FAN_ZONE(phy5, &phy32, 105)
+		FAN_ZONE(phy6, &phy40, 105)
+		FAN_ZONE(phy7, &phy48, 105)
+		FAN_ZONE(phy8, &phy50, 105)
 	};
 };
 
@@ -199,9 +309,11 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		adt7475@2e {
+		adt7475: adt7475@2e {
 			compatible = "adi,adt7475";
 			reg = <0x2e>;
+			#pwm-cells = <3>;
+			#thermal-sensor-cells = <1>;
 		};
 	};
 };
@@ -318,11 +430,35 @@
 	};
 };
 
-&phy0 { pses = <&pse_pi0>; };
-&phy8 { pses = <&pse_pi1>; };
-&phy16 { pses = <&pse_pi2>; };
-&phy24 { pses = <&pse_pi3>; };
-&phy32 { pses = <&pse_pi4>; };
-&phy40 { pses = <&pse_pi5>; };
-&phy48 { pses = <&pse_pi6>; };
-&phy50 { pses = <&pse_pi7>; };
+&phy0 {
+	pses = <&pse_pi0>;
+	#thermal-sensor-cells = <0>;
+};
+&phy8 {
+	pses = <&pse_pi1>;
+	#thermal-sensor-cells = <0>;
+};
+&phy16 {
+	pses = <&pse_pi2>;
+	#thermal-sensor-cells = <0>;
+};
+&phy24 {
+	pses = <&pse_pi3>;
+	#thermal-sensor-cells = <0>;
+};
+&phy32 {
+	pses = <&pse_pi4>;
+	#thermal-sensor-cells = <0>;
+};
+&phy40 {
+	pses = <&pse_pi5>;
+	#thermal-sensor-cells = <0>;
+};
+&phy48 {
+	pses = <&pse_pi6>;
+	#thermal-sensor-cells = <0>;
+};
+&phy50 {
+	pses = <&pse_pi7>;
+	#thermal-sensor-cells = <0>;
+};
