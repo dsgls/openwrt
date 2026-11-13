@@ -235,11 +235,23 @@
 			 * Vendor layout has two kernel partitions:
 			 * (1) <0x150000 0xec0000> = "kernel0"
 			 * (2) <0x1010000 0xed0000> = "kernel1"
+			 * The last 64 KiB of kernel1 is not kernel; see "bootselect".
 			 */
 			partition@150000 {
 				label = "firmware";
-				reg = <0x150000 0x1d90000>;
+				reg = <0x150000 0x1d80000>;
 				compatible = "openwrt,uimage", "denx,uimage";
+			};
+
+			/*
+			 * Boot bank record of U-Boot's bootubnt. bootubnt rewrites
+			 * the whole block when the record is invalid, so it must
+			 * stay outside "firmware".
+			 */
+			partition@1ed0000 {
+				label = "bootselect";
+				reg = <0x1ed0000 0x10000>;
+				read-only;
 			};
 
 			partition@1ee0000 {
